@@ -33,13 +33,33 @@ pwsh -File scripts/build-launcher.ps1
 | `DshLauncher.exe stop` | 杀掉 → 等端口释放 |
 | `DshLauncher.exe status` | 只打印状态（诊断用，退出码 0=在跑 1=没跑） |
 
+⚠️ 是 `winexe` 编译的（无控制台），所以 `status` **不往 stdout 输出**，
+而是写 `%LOCALAPPDATA%\DSH\status.txt`，靠退出码传达状态。
+
+```powershell
+& .\DshLauncher.exe status | Out-Null
+Get-Content "$env:LOCALAPPDATA\DSH\status.txt"
+```
+
+## 编译目标必须是 winexe
+
+`/target:exe` 是**控制台**子系统（PE Subsystem=3），每次运行都会分配一个黑色
+控制台窗口 —— 表现为「点一下弹出两个窗口」（一个黑框 + 一个菜单）。
+`/target:winexe` 才是 Windows GUI 子系统（Subsystem=2），没有控制台。
+
+`scripts/build-launcher.ps1` 会校验编译产物的 PE Subsystem 必须等于 2，
+不对就报错退出。
+
+代价：`winexe` 下 `Console.*` 全部失效（输出乱码、重定向也拿不到），
+所以 `status` 改用文件传达。
+
 ## 为什么是编译过的 exe
 
 实测「从启动到菜单出现」：
 
 | 方案 | 耗时 |
 |---|---|
-| **.NET exe（本方案）** | **93–134 ms** |
+| **.NET exe（本方案）** | **99–159 ms** |
 | pwsh 7 脚本（去掉状态探测） | ~453 ms |
 | pwsh 7 脚本（原实现，含探测） | ~896–976 ms |
 | powershell 5.1 脚本 | ~1528 ms |

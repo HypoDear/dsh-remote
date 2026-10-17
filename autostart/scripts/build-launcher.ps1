@@ -28,8 +28,13 @@ if (-not $csc) {
 }
 Write-Host "使用编译器：$csc"
 
-# System.Management 用于读 CommandLine（进程匹配）
-& $csc /nologo /target:exe /platform:anycpu /optimize+ `
+# 必须用 /target:winexe，不能用 /target:exe。
+# /target:exe 是**控制台**子系统（PE Subsystem=3），每次运行都分配一个黑色
+# 控制台窗口 —— 用户看到的就是「点一下弹出两个窗口」。
+# /target:winexe 是 Windows GUI 子系统（Subsystem=2），没有控制台。
+# 代价：winexe 下 Console.* 全部失效（输出乱码、重定向也拿不到），
+# 所以 status 改成写 %LOCALAPPDATA%\DSH\status.txt，靠退出码传达状态。
+& $csc /nologo /target:winexe /platform:anycpu /optimize+ `
     /out:$exe `
     /r:System.Windows.Forms.dll `
     /r:System.Drawing.dll `
@@ -42,16 +47,30 @@ if (-not (Test-Path $exe)) { throw '编译没有产出 exe' }
 $size = (Get-Item $exe).Length
 Write-Host "已生成：$exe  ($size bytes)" -ForegroundColor Green
 
-# 冒烟测试：只跑 status，不该弹菜单
-$out = & $exe status 2>&1
+# 验证子系统真的是 2（Windows GUI）—— 这是「不弹控制台窗口」的判据
+$bytes = [System.IO.File]::ReadAllBytes($exe)
+$peOff = [BitConverter]::ToInt32($bytes, 0x3C)
+$subsystem = [BitConverter]::ToUInt16($bytes, $peOff + 0x5C)
+Write-Host "PE Subsystem = $subsystem  $(if ($subsystem -eq 2) { '(Windows GUI，无控制台)' } else { '(!! 控制台子系统，会弹黑窗)' })"
+if ($subsystem -ne 2) { throw "Subsystem 应为 2，实得 $subsystem" }
+
+# 冒烟测试：跑 status，读它的输出文件
+$statusFile = Join-Path $env:LOCALAPPDATA 'DSH\status.txt'
+Remove-Item $statusFile -Force -ErrorAction SilentlyContinue
+& $exe status | Out-Null
 $code = $LASTEXITCODE
+
 Write-Host ''
 Write-Host 'status 冒烟测试：'
-$out | ForEach-Object { Write-Host "  $_" }
-Write-Host "  退出码: $code"
+if (Test-Path $statusFile) {
+    Get-Content $statusFile -Encoding UTF8 | ForEach-Object { Write-Host "  $_" }
+}
+else { Write-Host '  !! 没有生成 status.txt' ; throw 'status 未写文件' }
+Write-Host "  退出码: $code  $(if ($code -in 0,1) { '(合法)' } else { '(!! 意外)' })"
 
-if ($code -notin 0, 1) {
-    throw "status 返回了意外退出码 $code"
+if ($code -notin 0, 1) { throw "status 返回了意外退出码 $code" }
+if ($code -ne 0 -and -not (Get-Content $statusFile -Raw).Contains('未监听')) {
+    throw '退出码 1 但文件内容不是「未监听」'
 }
 
 Write-Host ''

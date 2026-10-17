@@ -56,10 +56,16 @@ static class Program
 
                 if (action == "status")
                 {
-                    Console.WriteLine("DSH Web 状态");
-                    Console.WriteLine("  端口 {0}: {1}", Port, running ? "监听中" : "未监听");
-                    Console.WriteLine("  地址: http://127.0.0.1:{0}", Port);
-                    Console.WriteLine("  日志: {0}", LogPath);
+                    // winexe（Windows 子系统）没有控制台，Console.* 全部失效：
+                    // 输出会乱码、重定向也拿不到。所以 status 写文件，由调用方读。
+                    // 退出码仍然是主信息来源：0 = 在跑，1 = 没跑。
+                    string text =
+                        "DSH Web 状态" + Environment.NewLine +
+                        "  端口 " + Port + ": " + (running ? "监听中" : "未监听") + Environment.NewLine +
+                        "  地址: http://127.0.0.1:" + Port + Environment.NewLine +
+                        "  日志: " + LogPath + Environment.NewLine;
+                    try { System.IO.File.WriteAllText(StatusPath, text, System.Text.Encoding.UTF8); }
+                    catch { }
                     return running ? 0 : 1;
                 }
 
@@ -83,6 +89,17 @@ static class Program
     static string LogPath
     {
         get { return System.IO.Path.Combine(DshHome, @".dsh\logs\dsh-web.log"); }
+    }
+
+    // status 命令的输出文件。winexe 没有控制台，只能用文件传达。
+    static string StatusPath
+    {
+        get
+        {
+            return System.IO.Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+                @"DSH\status.txt");
+        }
     }
 
     static string NodeExe { get { return @"C:\Program Files\nodejs\node.exe"; } }
