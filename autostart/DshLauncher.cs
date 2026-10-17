@@ -140,63 +140,106 @@ static class Program
     {
         Action result = Action.None;
 
-        var menu = new ContextMenuStrip();
-        menu.ShowImageMargin = false;
-        menu.RenderMode = ToolStripRenderMode.System;
-
-        var header = new ToolStripMenuItem("DSH Web · " + (running ? "运行中" : "未运行"));
-        header.Enabled = false;
-        menu.Items.Add(header);
-        menu.Items.Add(new ToolStripSeparator());
-
-        var openItem = new ToolStripMenuItem("打开界面");
-        openItem.Click += delegate { result = Action.Open; menu.Close(); };
-        menu.Items.Add(openItem);
-
-        var restartItem = new ToolStripMenuItem("重启 DSH");
-        restartItem.Enabled = running;
-        restartItem.Click += delegate { result = Action.Restart; menu.Close(); };
-        menu.Items.Add(restartItem);
-
-        var stopItem = new ToolStripMenuItem("停止 DSH");
-        stopItem.Enabled = running;
-        stopItem.Click += delegate { result = Action.Stop; menu.Close(); };
-        menu.Items.Add(stopItem);
-
-        // 点击外部 / Esc 关闭时不留残余
-        menu.Closed += delegate { Application.ExitThread(); };
-
-        // 关键：必须先把自己提到前台，ToolStripDropDown 才能收到外部点击与
-        // Esc。这是 Windows 弹右键菜单的标准前置动作，缺了它菜单就「关不掉」。
-        SetForegroundWindow(GetConsoleWindow());
-
-        ClickAwayHelper.Attach(menu);
-
-        Point at = Cursor.Position;
-        menu.Show(at);
-
-        // 菜单出现后异步补状态：先用「…」占位，探测完回填。
-        // 这样菜单不等探测，出现得早。
-        var probe = new System.Windows.Forms.Timer { Interval = 40 };
-        probe.Tick += delegate
+        // 隐藏的 owner 窗体。它的唯一作用是给菜单当 owner，并充当
+        // 「把本进程提到前台」的凭据 —— 见下面 SetForegroundWindow 的注释。
+        //
+        // 为什么必须有它（实测 2026-10-17）：
+        //   winexe 没有控制台 → GetConsoleWindow() 返回 0
+        //   → SetForegroundWindow(0) 返回 False（拿不到前台授权）
+        //   → 菜单不在前台，ToolStripDropDown 收不到「点外部」消息，
+        //     Esc 也不生效，于是菜单既不会自动关、点了也没反应。
+        //   换成隐藏 Form 的 Handle 后 SetForegroundWindow 返回 True。
+        using (var owner = new MenuOwner())
         {
-            probe.Stop();
-            probe.Dispose();
-            bool live = PortListening();
-            header.Text = "DSH Web · " + (live ? "运行中" : "未运行");
-            restartItem.Enabled = live;
-            stopItem.Enabled = live;
-        };
-        probe.Start();
+            owner.Show();
 
-        Application.Run();
-        menu.Dispose();
+            var menu = new ContextMenuStrip();
+            menu.ShowImageMargin = false;
+            menu.RenderMode = ToolStripRenderMode.System;
+
+            var header = new ToolStripMenuItem("DSH Web · " + (running ? "运行中" : "未运行"));
+            header.Enabled = false;
+            menu.Items.Add(header);
+            menu.Items.Add(new ToolStripSeparator());
+
+            var openItem = new ToolStripMenuItem("打开界面");
+            openItem.Click += delegate { result = Action.Open; menu.Close(); };
+            menu.Items.Add(openItem);
+
+            var restartItem = new ToolStripMenuItem("重启 DSH");
+            restartItem.Enabled = running;
+            restartItem.Click += delegate { result = Action.Restart; menu.Close(); };
+            menu.Items.Add(restartItem);
+
+            var stopItem = new ToolStripMenuItem("停止 DSH");
+            stopItem.Enabled = running;
+            stopItem.Click += delegate { result = Action.Stop; menu.Close(); };
+            menu.Items.Add(stopItem);
+
+            // 菜单关闭（无论何种原因）就结束消息循环
+            menu.Closed += delegate { Application.ExitThread(); };
+
+            // 把 owner 提到前台：这一步是「点外部能关」「点菜单项有反应」的前提。
+            // owner 在屏幕外且 ShowWithoutActivation=true，所以不会闪窗、不抢焦点。
+            SetForegroundWindow(owner.Handle);
+
+            ClickAwayHelper.Attach(menu);
+
+            Point at = Cursor.Position;
+
+            // 真正的消息循环：把 owner 的句柄交给 Run(IntPtr)。
+            //
+            // 为什么不用无参 Application.Run()：它只在**没有任何窗口**时才建立
+            // 循环，菜单已 Show 的情况下它会立刻返回（或建错循环），menu.Close()
+            // 就无法结束它 —— 实测表现为「菜单项点了没反应、进程不退出」。
+            // Run(owner.Handle) 明确以 owner 为载体建立循环，Closed 里的
+            // ExitThread() 才能生效。
+            menu.Show(at);
+
+            // 菜单出现后异步补状态：先用初始判断占位，探测完回填。
+            // 这样菜单不等探测，出现得早。
+            var probe = new System.Windows.Forms.Timer { Interval = 40 };
+            probe.Tick += delegate
+            {
+                probe.Stop();
+                probe.Dispose();
+                bool live = PortListening();
+                header.Text = "DSH Web · " + (live ? "运行中" : "未运行");
+                restartItem.Enabled = live;
+                stopItem.Enabled = live;
+            };
+            probe.Start();
+
+            Application.Run(owner);
+            menu.Dispose();
+        }
         return result;
     }
 
+    /// <summary>
+    /// 屏幕外的 1×1 隐藏窗体，只用来当菜单 owner 和前台授权凭据。
+    /// ShowWithoutActivation 保证它显示时不抢焦点。
+    /// </summary>
+    sealed class MenuOwner : Form
+    {
+        public MenuOwner()
+        {
+            ShowInTaskbar = false;
+            FormBorderStyle = FormBorderStyle.None;
+            Size = new Size(1, 1);
+            StartPosition = FormStartPosition.Manual;
+            Location = new Point(-32000, -32000);
+        }
+        protected override bool ShowWithoutActivation { get { return true; } }
+    }
+
     // 让菜单在点击自身以外任何地方时关闭。
-    // ToolStripDropDown 默认没有 owner 时不会自动捕获外部点击 —— 这是
-    // 「关不掉菜单」的第二个成因，必须显式装一个消息过滤器。
+    //
+    // 为什么需要它：ToolStripDropDown 只有在「自己拥有焦点」时才会自动处理
+    // 外部点击关闭。我们弹菜单时前台窗口未必是它，所以显式装消息过滤器兜底。
+    //
+    // 与 owner 的 SetForegroundWindow 是两道保险，缺任何一道都可能出现
+    // 「点桌面其他地方菜单不消失」。
     static class ClickAwayHelper
     {
         static MessageFilter _filter;
@@ -218,24 +261,38 @@ static class Program
             {
                 const int WM_LBUTTONDOWN = 0x0201;
                 const int WM_RBUTTONDOWN = 0x0204;
+                const int WM_MBUTTONDOWN = 0x0207;
                 const int WM_KEYDOWN = 0x0100;
+                const int VK_ESCAPE = 0x1B;
 
-                if (m.Msg == WM_LBUTTONDOWN || m.Msg == WM_RBUTTONDOWN)
+                if (!_menu.Visible) return false;
+
+                if (m.Msg == WM_KEYDOWN)
                 {
-                    if (!_menu.Visible) return false;
-                    Point pt = new Point(m.LParam.ToInt32() & 0xFFFF,
-                                         (m.LParam.ToInt32() >> 16) & 0xFFFF);
+                    if (m.WParam.ToInt32() == VK_ESCAPE)
+                    {
+                        _menu.Close();
+                        Application.ExitThread();
+                        return true;
+                    }
+                    return false;
+                }
+
+                if (m.Msg == WM_LBUTTONDOWN || m.Msg == WM_RBUTTONDOWN || m.Msg == WM_MBUTTONDOWN)
+                {
+                    // 坐标必须按**有符号**短整型解析（多显示器时 x/y 可能为负，
+                    // 也可能是屏幕坐标超出 0xFFFF）。用 LOWORD/HIWORD 无符号截取
+                    // 会让副屏上的点击算错位置，表现为「点了外部却不关」。
+                    int lo = (int)(m.LParam.ToInt64() & 0xFFFF);
+                    int hi = (int)((m.LParam.ToInt64() >> 16) & 0xFFFF);
+                    Point pt = new Point((short)lo, (short)hi);
+
                     if (!_menu.Bounds.Contains(pt))
                     {
                         _menu.Close();
                         Application.ExitThread();
                     }
-                }
-                else if (m.Msg == WM_KEYDOWN && m.WParam.ToInt32() == 0x1B) // VK_ESCAPE
-                {
-                    _menu.Close();
-                    Application.ExitThread();
-                    return true;
+                    return false;
                 }
                 return false;
             }
@@ -422,7 +479,4 @@ static class Program
 
     [DllImport("user32.dll")]
     static extern bool SetForegroundWindow(IntPtr hWnd);
-
-    [DllImport("kernel32.dll")]
-    static extern IntPtr GetConsoleWindow();
 }
